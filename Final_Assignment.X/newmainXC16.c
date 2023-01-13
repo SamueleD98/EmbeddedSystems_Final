@@ -72,7 +72,8 @@ typedef struct{
 
 typedef struct{
     double angular;
-    double linear;
+    double linear_R;
+    double linear_L;
 } cartesian_velocity;
 
 typedef struct{
@@ -96,6 +97,8 @@ volatile int state = STANDARD_MODE;
 volatile bool button_s6_flag = false;
 volatile bool button_s5_flag = false;
 
+float r = 0.2;
+float l = 0.5;
 
 void tmr_wait_ms();
 void tmr_setup_period();
@@ -127,13 +130,13 @@ int main(int argc, char** argv) {
     
     // ADC (for "current" and temperature)
     // with the following setup we have a full sampling + conversion in 0.7 ms
-	// automatic start - automatic end??
+		// automatic start - automatic end??
     ADCON3bits.ADCS = 32; //longest Tad
     ADCON1bits.ASAM = 0; // manual start
     ADCON1bits.SSRC = 7; // conversion starts after time specified by SAMC
     ADCON3bits.SAMC = 31; // longest sample time
     ADCON2bits.CHPS = 1; // CH0 and CH1
-	// Serve solo 1 canale
+		// Serve solo 1 canale
     ADCHSbits.CH0SA = 2; // positive input AN2 (potentiometer)   
     ADCHSbits.CH123SA = 1; // positive input AN3 (termometer)
     ADPCFG = 0xFFFF;    // everything to digital
@@ -211,6 +214,21 @@ int main(int argc, char** argv) {
     IEC1bits.U2RXIE = 1; // enable receiver interrupt 
     
     ADCON1bits.SAMP = 1; // start first sampling
+	
+    motor_velocity compute_rpm(cartesian_velocity desired_v){
+    // DO THE differential drive kinematic model, 
+    // MAYBE DO THE FUNCTION AS A VOID ONE THAT EDITS A PASSED VARIABLE
+    
+	double R = desired_v.linear_R/desired_v.angular; // idem per linear_L
+	desired_v.linear_L = desired_v.angular(R - l/2);
+	desired_v.linear_R = desired_v.angular(R + l/2);
+	
+    motor_velocity rpm;
+    rpm.right = (60*desired_v.linear_R)/(2*pi*r);
+    rpm.left = (60*desired_v.linear_L)/(2*pi*r);
+    
+    return rpm;
+    }
     
     tmr_setup_period(TIMER1, HEARTBEAT_TIME);
     while(1) {
@@ -251,15 +269,6 @@ int main(int argc, char** argv) {
     return (EXIT_SUCCESS);
 }
 
-motor_velocity compute_rpm(cartesian_velocity desired_v){
-    // DO THE differential drive kinematic model, 
-    // MAYBE DO THE FUNCTION AS A VOID ONE THAT EDITS A PASSED VARIABLE
-    motor_velocity rpm;
-    rpm.left = 50;
-    rpm.right = 50;
-    
-    return rpm;
-}
 
 void task1(parser_state* pstate, double* avg_temp, int n, int* no_ref_counter, bool* led_D4_flag, bool* ref_out_of_bound, bool* button_S6_flag, motor_velocity* effective_v){
     char byte;
@@ -324,6 +333,7 @@ void task1(parser_state* pstate, double* avg_temp, int n, int* no_ref_counter, b
             char char1[4], char2[4];      
             move_cursor(2,0);
             write_str_LCD(str2);
+			
             if(!button_s6_flag){ 
                 sprintf(char1, "%.1f", effective_v->left);
                 sprintf(char2, "%.1f", effective_v->right);
@@ -722,7 +732,7 @@ void __attribute__ (( __interrupt__ , __auto_psv__ )) _T3Interrupt() {
     IFS0bits.T3IF = 0;      // reset interrupt flag
     T3CONbits.TON = 0;      // stop the timer
     
-    // If the button is not pressed
+    // If the button is not pressed 
     if (PORTEbits.RE8 == 1) {
         button_s5_flag = true;
         //PDC2 = PTPER;
