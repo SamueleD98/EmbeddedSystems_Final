@@ -127,11 +127,13 @@ int main(int argc, char** argv) {
     
     // ADC (for "current" and temperature)
     // with the following setup we have a full sampling + conversion in 0.7 ms
+	// automatic start - automatic end??
     ADCON3bits.ADCS = 32; //longest Tad
     ADCON1bits.ASAM = 0; // manual start
     ADCON1bits.SSRC = 7; // conversion starts after time specified by SAMC
     ADCON3bits.SAMC = 31; // longest sample time
     ADCON2bits.CHPS = 1; // CH0 and CH1
+	// Serve solo 1 canale
     ADCHSbits.CH0SA = 2; // positive input AN2 (potentiometer)   
     ADCHSbits.CH123SA = 1; // positive input AN3 (termometer)
     ADPCFG = 0xFFFF;    // everything to digital
@@ -195,7 +197,6 @@ int main(int argc, char** argv) {
     int no_ref_counter = 0;
     bool ref_out_of_bound = false;
     //bool led_D4_flag = false;
-    bool button_S6_flag = false;	// già dichiarato sopra (?)
     motor_velocity effective_v;
     
     tmr_wait_ms(TIMER1, 1000); // wait 1 second at startup 
@@ -226,14 +227,15 @@ int main(int argc, char** argv) {
                         n++;
                         break;
                     case 1: // 5 Hz
-                       
+			task2(motor_velocity* effective_v);
                         break;
                     case 2: // 2 Hz
-                        LATBbits.LATB0 = !LATBbits.LATB0;
-                        break;
-                        
+			task3();
+                        // LATBbits.LATB0 = !LATBbits.LATB0;
+                        break;                        
                     case 3: // 1 Hz
                         n = 0;  // Start a new set of temperatures to average
+			// task4 ???
                         break;
                 }
                 schedInfo[i].n = 0;
@@ -343,7 +345,7 @@ void task1(parser_state* pstate, double* avg_temp, int n, int* no_ref_counter, b
                 //*led_D4_flag = true;
             }
         }else{ //TIMEOUT MODE
-            LATBbits.LATB1 = !LATBbits.LATB1;
+            LATBbits.LATB1 = !LATBbits.LATB1; // toggle D4
         }
         
         
@@ -435,7 +437,7 @@ void task4(bool* ref_out_of_bound, motor_velocity* computed_v, double* avg_temp)
     
     
     
-    //the MCALE thing
+    //$MCALE,n1,n2*, where n1 and n2 are the compute wheel RPM values that are outside the maximum allowed values
     if(*ref_out_of_bound){
         char str2[18];
         char n1[4], n2[4];      
