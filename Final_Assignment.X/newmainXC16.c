@@ -53,6 +53,10 @@
 #define NEW_MESSAGE (1) // new message received and parsed completely
 #define NO_MESSAGE (0) // no new messages
 
+#define RADIUS 0.2
+#define AXLE 0.5
+#define PI 3.14159
+
 #define BUFFER_SIZE 21
 typedef struct {
     char buffer[BUFFER_SIZE];
@@ -72,8 +76,7 @@ typedef struct{
 
 typedef struct{
     double angular;
-    double linear_R;
-    double linear_L;
+    double linear;
 } cartesian_velocity;
 
 typedef struct{
@@ -97,8 +100,6 @@ volatile int state = STANDARD_MODE;
 volatile bool button_s6_flag = false;
 volatile bool button_s5_flag = false;
 
-float r = 0.2;
-float l = 0.5;
 
 void tmr_wait_ms();
 void tmr_setup_period();
@@ -130,13 +131,10 @@ int main(int argc, char** argv) {
     
     // ADC (for "current" and temperature)
     // with the following setup we have a full sampling + conversion in 0.7 ms
-		// automatic start - automatic end??
     ADCON3bits.ADCS = 32; //longest Tad
-    // ADCON1bits.ASAM = 0; // manual start
-	ADCON1bits.ASAM = 1; // automatic start
-	ADCON3bits.SAMC = 31; // longest sample time
+    ADCON1bits.ASAM = 0; // manual start
     ADCON1bits.SSRC = 7; // conversion starts after time specified by SAMC
-		// Serve solo 1 canale
+    // Serve solo 1 canale
     // ADCON2bits.CHPS = 1; // CH0 and CH1
 	ADCON2bits.CHPS = 0b00; // CH0
     // ADCHSbits.CH0SA = 2; // positive input AN2 (potentiometer)   
@@ -146,7 +144,7 @@ int main(int argc, char** argv) {
     // ADPCFGbits.PCFG2 = 0; // AN2 as analog input
     ADPCFGbits.PCFG3 = 0; // AN3 as analog input
     ADCON1bits.SIMSAM = 0; // sample in sequence
-    ADCON2bits.SMPI = 1;  // number of inputs - 1
+    ADCON2bits.SMPI = 0;  // number of inputs - 1
     ADCON1bits.ADON = 1; //turn on
    
     /*// Configuration SPI
@@ -172,13 +170,23 @@ int main(int argc, char** argv) {
     U2STAbits.URXISEL = 0b00;// interrupt when a character is received    
     // interrupts enabled later
     
-    //PWM
-// 2 PWM = 1 PWM bisogna solo settare high (?) diverso
+    //PWMs
     PTCONbits.PTCKPS = 0b00; // prescaler
     PTCONbits.PTMOD = 0; // free running mode
-    PWMCON1bits.PEN2H = 0b1; // set as output
+    //LEFT WHEEL MOTOR
+    PWMCON1bits.PEN2H = 1; // set as output
+    PWMCON1bits.PEN2L = 1; // set as output
+    //RIGHT WHEEL MOTOR
+    PWMCON1bits.PEN3H = 1; // set as output
+    PWMCON1bits.PEN3L = 1; // set as output
+
     PTPER = 1842; // round of 1842.2 to the smallest integer
-    PDC2 = 0;  // duty cycle 0% -> 0 V
+    PDC2 = PTPER;  // duty cycle 50% -> 0 V
+    PDC3 = PTPER;  // duty cycle 50% -> 0 V
+    
+    DTCON1bits.DTAPS = 0;
+    DTCON1bits.DTA = 1; //what if to be 1 the value should be 0 as the previous register bit????
+
     PTCONbits.PTEN = 1;
     
 	//parser initialization
@@ -203,7 +211,7 @@ int main(int argc, char** argv) {
     int no_ref_counter = 0;
     bool ref_out_of_bound = false;
     //bool led_D4_flag = false;
-    motor_velocity effective_v;
+    motor_velocity effective_rpms;
     
     tmr_wait_ms(TIMER1, 1000); // wait 1 second at startup 
     
@@ -217,21 +225,6 @@ int main(int argc, char** argv) {
     IEC1bits.U2RXIE = 1; // enable receiver interrupt 
     
     ADCON1bits.SAMP = 1; // start first sampling
-	
-    motor_velocity compute_rpm(cartesian_velocity desired_v){
-    // DO THE differential drive kinematic model, 
-    // MAYBE DO THE FUNCTION AS A VOID ONE THAT EDITS A PASSED VARIABLE
-    
-	double R = desired_v.linear_R/desired_v.angular; // idem per linear_L
-	desired_v.linear_L = desired_v.angular(R - l/2);
-	desired_v.linear_R = desired_v.angular(R + l/2);
-	
-    motor_velocity rpm;
-    rpm.right = (60*desired_v.linear_R)/(2*pi*r);
-    rpm.left = (60*desired_v.linear_L)/(2*pi*r);
-    
-    return rpm;
-    }
     
     tmr_setup_period(TIMER1, HEARTBEAT_TIME);
     while(1) {
@@ -244,19 +237,18 @@ int main(int argc, char** argv) {
                 switch(i){
                     case 0: // 10 Hz
                       
-                        task1(&pstate, &avg_temp, n, &no_ref_counter, &ref_out_of_bound, &button_S6_flag, &effective_v);
+                        task1(&pstate, &avg_temp, n, &no_ref_counter, &ref_out_of_bound, &effective_rpms);
                         n++;
                         break;
                     case 1: // 5 Hz
-			task2(motor_velocity* effective_v);
+                       
                         break;
                     case 2: // 2 Hz
-			task3();
-                        // LATBbits.LATB0 = !LATBbits.LATB0;
-                        break;                        
+                        LATBbits.LATB0 = !LATBbits.LATB0;
+                        break;
+                        
                     case 3: // 1 Hz
                         n = 0;  // Start a new set of temperatures to average
-			// task4 ???
                         break;
                 }
                 schedInfo[i].n = 0;
@@ -272,8 +264,21 @@ int main(int argc, char** argv) {
     return (EXIT_SUCCESS);
 }
 
+void compute_rpm(cartesian_velocity desired_v, motor_velocity* computed_rpms){
 
-void task1(parser_state* pstate, double* avg_temp, int n, int* no_ref_counter, bool* led_D4_flag, bool* ref_out_of_bound, bool* button_S6_flag, motor_velocity* effective_v){
+    double omega_r = (desired_v.linear - (AXLE * desired_v.angular /2 ))/RADIUS;
+    double omega_l = (desired_v.linear + (AXLE * desired_v.angular /2 ))/RADIUS;
+
+    computed_rpms->right = omega_r * 30/(PI*RADIUS);
+    computed_rpms->left  = omega_l * 30/(PI*RADIUS);
+}
+
+void set_rpm(motor_velocity effective_rpms){
+   PDC2 = PTPER * (1 + effective_rpms.left/60); 
+   PDC3 = PTPER * (1 + effective_rpms.right/60); 
+}
+
+void task1(parser_state* pstate, double* avg_temp, int n, int* no_ref_counter, bool* led_D4_flag, bool* ref_out_of_bound, motor_velocity* effective_rpms){
     char byte;
     
     //temperature stuff
@@ -311,35 +316,35 @@ void task1(parser_state* pstate, double* avg_temp, int n, int* no_ref_counter, b
             //*led_D4_flag = false;
             LATBbits.LATB1 = 0;
             
-            motor_velocity computed_v = compute_rpm(desired_v);
-            *effective_v = computed_v;
+            motor_velocity computed_rpms;
+            compute_rpm(desired_v, &computed_rpms);
+            *effective_rpms = computed_rpms;
             
             *ref_out_of_bound = false;
             
             // LEFT
-            if(computed_v.left < -50 && computed_v.left > 50){ 
-                effective_v->left = computed_v.left / abs(computed_v.left)*50;
+            if(computed_rpms.left < -50 && computed_rpms.left > 50){ 
+                effective_rpms->left = computed_rpms.left / abs(computed_rpms.left)*50;
                 *ref_out_of_bound = true;   
             }
-            if(computed_v.right < -50 && computed_v.right > 50){ 
-                effective_v->right = computed_v.right / abs(computed_v.right)*50;
+            if(computed_rpms.right < -50 && computed_rpms.right > 50){ 
+                effective_rpms->right = computed_rpms.right / abs(computed_rpms.right)*50;
                 *ref_out_of_bound = true;   
             }
             
             // change with the right PDC and stuff !!!!!!!!!!!
-            set_rpm(*effective_v);
-            PDC2 = PTPER * (1 + effective_v->right/60); // DUTY CYCLE TO CHECK !!!!
-            PDC2 = PTPER * (1 + effective_v->left/60); // DUTY CYCLE TO CHECK !!!!
+            set_rpm(*effective_rpms);
+            PDC2 = PTPER * (1 + effective_rpms->right/60); // DUTY CYCLE TO CHECK !!!!
+            PDC2 = PTPER * (1 + effective_rpms->left/60); // DUTY CYCLE TO CHECK !!!!
             
             // write second row
             char str2[] = "R: ";
             char char1[4], char2[4];      
             move_cursor(2,0);
             write_str_LCD(str2);
-			
             if(!button_s6_flag){ 
-                sprintf(char1, "%.1f", effective_v->left);
-                sprintf(char2, "%.1f", effective_v->right);
+                sprintf(char1, "%.1f", effective_rpms->left);
+                sprintf(char2, "%.1f", effective_rpms->right);
                 // "R: n1; n2" ni are rpms
             }else{
                 sprintf(char1, "%.1f", desired_v.angular);
@@ -358,7 +363,7 @@ void task1(parser_state* pstate, double* avg_temp, int n, int* no_ref_counter, b
                 //*led_D4_flag = true;
             }
         }else{ //TIMEOUT MODE
-            LATBbits.LATB1 = !LATBbits.LATB1; // toggle D4
+            LATBbits.LATB1 = !LATBbits.LATB1;
         }
         
         
@@ -402,11 +407,11 @@ void task1(parser_state* pstate, double* avg_temp, int n, int* no_ref_counter, b
     ADCON1bits.SAMP = 1; // start sampling
 }
 
-void task2(motor_velocity* effective_v){    //could it be better to pass the chars already?
+void task2(motor_velocity* effective_rpms){    //could it be better to pass the chars already?
     char str[18];
     char n1[4], n2[4];      
-    sprintf(n1, "%.1f", effective_v->left);  
-    sprintf(n2, "%.1f", effective_v->right);
+    sprintf(n1, "%.1f", effective_rpms->left);  
+    sprintf(n2, "%.1f", effective_rpms->right);
            
     strcpy(str, "$MCFBK,");
     strcat(str, n1);
@@ -450,7 +455,7 @@ void task4(bool* ref_out_of_bound, motor_velocity* computed_v, double* avg_temp)
     
     
     
-    //$MCALE,n1,n2*, where n1 and n2 are the compute wheel RPM values that are outside the maximum allowed values
+    //the MCALE thing
     if(*ref_out_of_bound){
         char str2[18];
         char n1[4], n2[4];      
@@ -474,13 +479,7 @@ void parse_hlref(const char* msg, cartesian_velocity* d_vel){
     d_vel->angular = extract_integer(msg);
     i = next_value(msg, i);
     d_vel->linear = extract_integer(msg + i);
-}
-
- void set_rpm(motor_velocity effective_v){
-    PDC2 = PTPER * (1 + effective_v.right/60); // DUTY CYCLE TO CHECK !!!!
-    PDC2 = PTPER * (1 + effective_v.left/60); // DUTY CYCLE TO CHECK !!!!
- }
-            
+}          
 
 int parse_byte(parser_state* ps, char byte){
     switch (ps->state){
@@ -735,14 +734,14 @@ void __attribute__ (( __interrupt__ , __auto_psv__ )) _T3Interrupt() {
     IFS0bits.T3IF = 0;      // reset interrupt flag
     T3CONbits.TON = 0;      // stop the timer
     
-    // If the button is not pressed 
+    // If the button is not pressed
     if (PORTEbits.RE8 == 1) {
         button_s5_flag = true;
-        //PDC2 = PTPER;
-        motor_velocity effective_v;
-        effective_v.right = 0;
-        effective_v.left = 0;
-        set_rpm(effective_v);       
+        
+        motor_velocity rpms;
+        rpms.right = 0;
+        rpms.left = 0;
+        set_rpm(rpms);       
     }
     
     IFS0bits.INT0IF = 0;    // reset interrupt flag
@@ -762,4 +761,3 @@ void __attribute__ (( __interrupt__ , __auto_psv__ )) _T4Interrupt() {
     IEC1bits.INT1IE = 1;    // enable interrupt
     
 }
-
