@@ -165,6 +165,7 @@ int main(int argc, char** argv) {
     // interrupts enabled later
     
     //PWM
+// 2 PWM = 1 PWM bisogna solo settare high (?) diverso
     PTCONbits.PTCKPS = 0b00; // prescaler
     PTCONbits.PTMOD = 0; // free running mode
     PWMCON1bits.PEN2H = 0b1; // set as output
