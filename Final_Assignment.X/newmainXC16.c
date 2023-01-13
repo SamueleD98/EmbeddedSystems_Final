@@ -132,15 +132,18 @@ int main(int argc, char** argv) {
     // with the following setup we have a full sampling + conversion in 0.7 ms
 		// automatic start - automatic end??
     ADCON3bits.ADCS = 32; //longest Tad
-    ADCON1bits.ASAM = 0; // manual start
+    // ADCON1bits.ASAM = 0; // manual start
+	ADCON1bits.ASAM = 1; // automatic start
+	ADCON3bits.SAMC = 31; // longest sample time
     ADCON1bits.SSRC = 7; // conversion starts after time specified by SAMC
-    ADCON3bits.SAMC = 31; // longest sample time
-    ADCON2bits.CHPS = 1; // CH0 and CH1
 		// Serve solo 1 canale
-    ADCHSbits.CH0SA = 2; // positive input AN2 (potentiometer)   
-    ADCHSbits.CH123SA = 1; // positive input AN3 (termometer)
+    // ADCON2bits.CHPS = 1; // CH0 and CH1
+	ADCON2bits.CHPS = 0b00; // CH0
+    // ADCHSbits.CH0SA = 2; // positive input AN2 (potentiometer)   
+    // ADCHSbits.CH123SA = 1; // positive input AN3 (termometer)
+	ADCHSbits.CH0SA = 0b11; // positive input AN3 (termometer)
     ADPCFG = 0xFFFF;    // everything to digital
-    ADPCFGbits.PCFG2 = 0; // AN2 as analog input
+    // ADPCFGbits.PCFG2 = 0; // AN2 as analog input
     ADPCFGbits.PCFG3 = 0; // AN3 as analog input
     ADCON1bits.SIMSAM = 0; // sample in sequence
     ADCON2bits.SMPI = 1;  // number of inputs - 1
