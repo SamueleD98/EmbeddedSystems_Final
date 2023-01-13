@@ -156,7 +156,8 @@ int main(int argc, char** argv) {
     cb_out.read_index = 0;
     
     // Configuration UART
-    U2BRG = 11; // BAUD RATE REG: (7372800 / 4) / (16 * 9600) - 1
+    U2BRG = 11; // BAUD RATE REG: (7372800 / 4) / (16 * 9600) - 1 
+// Bound rate supporta almeno 10Hz di entrambe le reference ricez/trasmit (considera caso peggiore--> 9600 tantissimi, 300 troppo poco rischi di vedere valori vecchi)
     U2MODEbits.UARTEN = 1;  // enable UART
     U2STAbits.UTXEN = 1;    // enable U2TX 
     U2STAbits.UTXISEL = 0b1; // interrupt when transmit buffer becomes empty
