@@ -193,7 +193,7 @@ int main(int argc, char** argv) {
     int no_ref_counter = 0;
     bool ref_out_of_bound = false;
     //bool led_D4_flag = false;
-    bool button_S6_flag = false;
+    bool button_S6_flag = false;	// già dichiarato sopra (?)
     motor_velocity effective_v;
     
     tmr_wait_ms(TIMER1, 1000); // wait 1 second at startup 
