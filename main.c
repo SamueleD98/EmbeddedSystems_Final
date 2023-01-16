@@ -160,7 +160,7 @@ int main(int argc, char** argv) {
     cb_out.read_index = 0;
     
     // Configuration UART
-    U2BRG = 16; // BAUD RATE REG: (7372800 / 4) / (16 * 6600) - 1 because we need to receive 24 Bytes/100ms and send 42 byte/100ms in the worst case scenario 
+    U2BRG = 11; // BAUD RATE REG: (7372800 / 4) / (16 * 6600) - 1 because we need to receive 24 Bytes/100ms and send 42 byte/100ms in the worst case scenario 
 // Bound rate supporta almeno 10Hz di entrambe le reference ricez/trasmit (considera caso peggiore--> 9600 tantissimi, 300 troppo poco rischi di vedere valori vecchi)
     U2MODEbits.UARTEN = 1;  // enable UART
     U2STAbits.UTXEN = 1;    // enable U2TX 
@@ -221,6 +221,11 @@ int main(int argc, char** argv) {
     
     ADCON1bits.SAMP = 1; // start first sampling
     
+    
+    effective_rpm.right = 0;
+    effective_rpm.left = 0;
+    set_rpm(effective_rpm);
+        
     tmr_setup_period(TIMER1, HEARTBEAT_TIME);
     while(1) {
         
@@ -465,7 +470,7 @@ void task4(bool* ref_out_of_bound, motor_velocity* computed_rpm, double* avg_tem
 
 void send_str(char *str){
     for(int i = 0; i < strlen(str); i++){
-        write_buffer(&cb_out, *str[i]);
+        write_buffer(&cb_out, str[i]);
     }
 }
 
