@@ -57,7 +57,7 @@
 #define AXLE 0.5
 #define PI 3.14159
 
-#define BUFFER_SIZE 42
+#define BUFFER_SIZE 420//51
 typedef struct {
     char buffer[BUFFER_SIZE];
     int read_index;
@@ -106,12 +106,13 @@ void tmr_setup_period();
 void tmr_wait_period();
 void write_str_LCD(); // for debug
 void move_cursor();   // for debug
+void empty_row();
 int read_buffer(volatile CircularBuffer*, char*);
 void write_buffer(volatile CircularBuffer*, char);
 int parse_byte(parser_state* ps, char byte);
 void parse_hlref(const char* msg, cartesian_velocity* d_vel);
 void set_rpm(motor_velocity);
-int next_value(const char* msg, int i);
+int next_value(const char* msg, int i, bool* is_point);
 int extract_integer();
 void send_str();
 void restart_tx();
@@ -268,11 +269,11 @@ int main(int argc, char** argv) {
 
 void compute_rpm(cartesian_velocity desired_v, motor_velocity* computed_rpm){
     // wheels velocity in rad/s
-    double omega_r = (desired_v.linear - (AXLE * desired_v.angular /2 ))/RADIUS;
-    double omega_l = (desired_v.linear + (AXLE * desired_v.angular /2 ))/RADIUS;
+    double omega_r = (desired_v.linear + (AXLE * desired_v.angular /2 ))/RADIUS;
+    double omega_l = (desired_v.linear - (AXLE * desired_v.angular /2 ))/RADIUS;
     // wheels velocity in rpm
-    computed_rpm->right = omega_r * 30/(PI*RADIUS);
-    computed_rpm->left  = omega_l * 30/(PI*RADIUS);
+    computed_rpm->right = omega_r * 30/(PI);
+    computed_rpm->left  = omega_l * 30/(PI);
 }
 
 void set_rpm(motor_velocity effective_rpm){
@@ -281,11 +282,12 @@ void set_rpm(motor_velocity effective_rpm){
    PDC3 = PTPER * (1 + effective_rpm.right/60); 
 }
 
-void task1(parser_state* pstate, double* avg_temp, int n, int* no_ref_counter, bool* led_D4_flag, bool* ref_out_of_bound, motor_velocity* computed_rpm, motor_velocity* effective_rpm){
+
+void task1(parser_state* pstate, double* avg_temp, int n, int* no_ref_counter, bool* ref_out_of_bound, motor_velocity* computed_rpm, motor_velocity* effective_rpm){
     // TEMPERATURE
     while(ADCON1bits.DONE == 0);   //actually it won't wait on this, the conversion is already over
     //retrieve the last converted value from the ADC,
-    int bitsT = ADCBUF1;
+    int bitsT = ADCBUF0;
     // from bits to volts
     float voltsT = bitsT * (5.00 / 1024.00);
     //from volts to degrees
@@ -338,8 +340,9 @@ void task1(parser_state* pstate, double* avg_temp, int n, int* no_ref_counter, b
             
             //LCD
             // write second row
+            empty_row(2, 0);
             char str2[] = "R: ";
-            char char1[4], char2[4];      
+            char char1[6], char2[6];      
             move_cursor(2,0);
             write_str_LCD(str2);
             if(!button_s6_flag){ 
@@ -409,8 +412,8 @@ void task1(parser_state* pstate, double* avg_temp, int n, int* no_ref_counter, b
 }
 
 void task2(motor_velocity* effective_rpm){    //could it be better to pass the chars already?
-    char str[18];
-    char n1[4], n2[4];      
+    char str[22];
+    char n1[6], n2[6];      
     sprintf(n1, "%.1f", effective_rpm->left);  
     sprintf(n2, "%.1f", effective_rpm->right);
            
@@ -439,8 +442,8 @@ void task2(motor_velocity* effective_rpm){    //could it be better to pass the c
 
 void task4(bool* ref_out_of_bound, motor_velocity* computed_rpm, double* avg_temp){
     //$MCTEM,temp* where temp is the temperature
-    char str1[18];
-    char temp[4];      
+    char str1[14];
+    char temp[6];      
     sprintf(temp, "%.1f", *avg_temp);  
 
     strcpy(str1, "$MCTEM,");
@@ -451,8 +454,8 @@ void task4(bool* ref_out_of_bound, motor_velocity* computed_rpm, double* avg_tem
 
     //the MCALE thing
     if(*ref_out_of_bound){
-        char str2[18];
-        char n1[4], n2[4];      
+        char str2[20];
+        char n1[6], n2[6];      
         sprintf(n1, "%.1f", computed_rpm->left);  
         sprintf(n2, "%.1f", computed_rpm->right);
 
@@ -493,13 +496,28 @@ void restart_tx(){
     IEC1bits.U2TXIE = 1;    // enable transmitter interrupt 
 }
 
-// ASSUMING VELOCITIES TO BE INTEGERS !!!!!!!!!!!!
 void parse_hlref(const char* msg, cartesian_velocity* d_vel){
     int i=0;
-    d_vel->angular = extract_integer(msg);
+    char *eptr;
+
+    double n1 = strtod(msg, &eptr);
+    
     i = next_value(msg, i);
-    d_vel->linear = extract_integer(msg + i);
-}          
+   
+    double n2 = strtod(msg+i, &eptr);
+   
+    d_vel->angular = n1;
+    d_vel->linear = n2;
+}    
+
+int next_value(const char* msg, int i){
+    while (msg[i] != ',' && msg[i] != '\0') { i++; }
+    if (msg[i] == ',' ){
+        i++;
+    }
+    return i;
+}
+
 
 int parse_byte(parser_state* ps, char byte){
     switch (ps->state){
@@ -539,30 +557,8 @@ int parse_byte(parser_state* ps, char byte){
     return NO_MESSAGE;
 }
 
-int extract_integer(const char* str) {
-	int i = 0, number = 0, sign = 1;
-	if (str[i] == '-') {
-		sign = -1;
-		i++;
-	}
-	else if (str[i] == '+') {
-		sign = 1;
-		i++;
-	}
-	while (str[i] != ',' && str[i] != '\0') {
-		number *= 10; // multiply the current number by 10;
-		number += str[i] - '0'; // converting character to decimal number
-		i++;
-	}
-	return sign*number;
-}
 
-int next_value(const char* msg, int i){
-    while (msg[i] != ',' && msg[i] != '\0') { i++; }
-    if (msg[i] == ',')
-        i++;
-    return i;
-}
+
 
 // Function to write on the buffer
 void write_buffer(volatile CircularBuffer* cb, char char_rcv){
