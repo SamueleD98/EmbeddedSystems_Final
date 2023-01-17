@@ -57,9 +57,11 @@
 #define AXLE 0.5
 #define PI 3.14159
 
-#define BUFFER_SIZE 420//51
+#define BUFFER_SIZE_IN 26
+#define BUFFER_SIZE_OUT 48
 typedef struct {
-    char buffer[BUFFER_SIZE];
+    char* buffer;
+    int size;
     int read_index;
     int write_index;
 } CircularBuffer;
@@ -156,13 +158,18 @@ int main(int argc, char** argv) {
     SPI1STATbits.SPIEN = 1; // enable SPI   
     
     // Set cb indexes to zero
+    char buff_in[BUFFER_SIZE_IN], buff_out[BUFFER_SIZE_OUT];
     cb_in.write_index = 0;
     cb_in.read_index = 0;
+    cb_in.buffer = buff_in;
+    cb_in.size  = BUFFER_SIZE_IN;
     cb_out.write_index = 0;
     cb_out.read_index = 0;
-    
+    cb_out.buffer = buff_out;
+    cb_out.size  = BUFFER_SIZE_OUT;
+   
     // Configuration UART
-    U2BRG = 11; // BAUD RATE REG: (7372800 / 4) / (16 * 6600) - 1 because we need to receive 24 Bytes/100ms and send 42 byte/100ms in the worst case scenario 
+    U2BRG = 24; // BAUD RATE REG: (7372800 / 4) / (16 * 4800) - 1 because we need to receive 24 Bytes/100ms and send 42 byte/100ms in the worst case scenario 
 // Bound rate supporta almeno 10Hz di entrambe le reference ricez/trasmit (considera caso peggiore--> 9600 tantissimi, 300 troppo poco rischi di vedere valori vecchi)
     U2MODEbits.UARTEN = 1;  // enable UART
     U2STAbits.UTXEN = 1;    // enable U2TX 
@@ -183,7 +190,7 @@ int main(int argc, char** argv) {
     PDC2 = PTPER;  // duty cycle 50% 
     PDC3 = PTPER;  // duty cycle 50% 
     DTCON1bits.DTAPS = 0;
-    DTCON1bits.DTA = 1; //what if to be 1 the value should be 0 as the previous register bit????
+    DTCON1bits.DTA = 6;
     PTCONbits.PTEN = 1;
     
 	//parser initialization
@@ -572,7 +579,7 @@ int parse_byte(parser_state* ps, char byte){
                 ps->state = STATE_DOLLAR;
                 ps->msg_payload[ps->index_payload] = '\0';
                 return NEW_MESSAGE;     
-            }else if(ps->index_payload == 15){                              // CHECK THESE NUMBERS !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+            }else if(ps->index_payload == 12){                              
                 ps->state = STATE_DOLLAR;
                 ps->index_payload = 0;           
             }else{
@@ -591,7 +598,7 @@ int parse_byte(parser_state* ps, char byte){
 void write_buffer(volatile CircularBuffer* cb, char char_rcv){
     cb->buffer[cb->write_index] = char_rcv;
     cb->write_index++;
-    if(cb->write_index == BUFFER_SIZE){
+    if(cb->write_index == cb->size){
         cb->write_index = 0;
     }
 }
@@ -603,7 +610,7 @@ int read_buffer(volatile CircularBuffer* cb, char* char_rcv){
     }
     *char_rcv = cb->buffer[cb->read_index];
     cb->read_index++;
-    if(cb->read_index == BUFFER_SIZE){
+    if(cb->read_index == cb->size){
         cb->read_index = 0;
     }
     return 1;
