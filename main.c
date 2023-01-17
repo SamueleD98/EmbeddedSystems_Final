@@ -102,6 +102,7 @@ volatile int state = STANDARD_MODE;
 volatile bool button_s6_flag = false;
 volatile bool button_s5_flag = false;
 volatile bool update_LCD = true;
+volatile bool no_ref = false;
 
 
 void tmr_wait_ms();
@@ -224,6 +225,7 @@ int main(int argc, char** argv) {
     // Enable interrupts
     IEC0bits.INT0IE = 1; //S5
     IEC1bits.INT1IE = 1; //S6
+    IEC0bits.T2IE = 1;
     IEC0bits.T3IE = 1;
     IEC1bits.T4IE = 1;
     IEC1bits.U2TXIE = 1; // enable transmitter interrupt 
@@ -237,6 +239,7 @@ int main(int argc, char** argv) {
     set_rpm(effective_rpm);
         
     tmr_setup_period(TIMER1, HEARTBEAT_TIME);
+    tmr_setup_period(TIMER2, 5000);
     while(1) {
         
         //scheduler        
@@ -323,7 +326,11 @@ void task1(parser_state* pstate, double* avg_temp, int n, int* no_ref_counter, b
         if (new_ref) {
             state = STANDARD_MODE; 
             update_LCD = true;
-            *no_ref_counter = 0; // reset the counter of no ref received
+            //*no_ref_counter = 0; // reset the counter of no ref received
+            // on timer
+            T2CONbits.TON = 1;      // stop the timer
+            TMR2 = 0; 
+            
             // MOTOR CONTROL
             
             parse_hlref(pstate->msg_payload, desired_v);
@@ -349,23 +356,18 @@ void task1(parser_state* pstate, double* avg_temp, int n, int* no_ref_counter, b
             set_rpm(*effective_rpm);
             
             
-        }else if(state == STANDARD_MODE){
-            // standard mode but no new reference
-            *no_ref_counter = *no_ref_counter + 1;     
-            if(*no_ref_counter>=50){    // 5 seconds but this task run at 10Hz
-                state = TIMEOUT_MODE;
-                update_LCD = true;
-                
-                // stop motors
+        }else if(state == TIMEOUT_MODE){
+            if (no_ref){
+                no_ref = false;
                 desired_v->angular = 0;
                 desired_v->linear = 0;
                 effective_rpm->left = 0;
                 effective_rpm->right = 0;
-              
-                set_rpm(*effective_rpm); 
+                set_rpm(*effective_rpm);
+                update_LCD = true;
             }
-        }else{ //TIMEOUT MODE
-            // toggle D4
+             
+            // stop timer
             LATBbits.LATB1 = !LATBbits.LATB1;
         }
     }else{ // safe mode
@@ -387,7 +389,7 @@ void task1(parser_state* pstate, double* avg_temp, int n, int* no_ref_counter, b
                 //if correct type
                 if (strcmp(pstate->msg_type, "HLENA") == 0){
                     state = STANDARD_MODE;
-                    *no_ref_counter = 0;
+                    T2CONbits.TON = 1;      // stop the timer 
                     update_LCD = true;
 
                     char str[] = "$MCACK,ENA,1*";                                 
@@ -616,6 +618,31 @@ int read_buffer(volatile CircularBuffer* cb, char* char_rcv){
     return 1;
 }
 
+void choose_prescaler(int ms, int* tckps, int* pr){
+    long ticks = 1843.2*ms;
+    if(ticks<=65535){
+        *tckps = 0;
+        *pr = ticks;
+        return; 
+    }
+    ticks = ticks / 8;
+    if(ticks<=65535){
+        *tckps = 1;
+        *pr = ticks;
+        return; 
+    }
+    ticks = ticks / 8;
+    if(ticks<=65535){
+        *tckps = 2;
+        *pr = ticks;
+        return; 
+    }
+    ticks = ticks / 4;
+    *tckps = 3;
+    *pr = ticks;
+    return;
+}
+
 // Function to busy-wait ms milliseconds
 void tmr_wait_ms(int timer, int ms){
     tmr_setup_period(timer, ms);
@@ -641,33 +668,35 @@ void tmr_wait_ms(int timer, int ms){
 
 // Function for setting up a timer
 void tmr_setup_period(int timer, int ms) {
+    int tckps, pr;
+    choose_prescaler(ms, &tckps, &pr);
     switch (timer){
         case TIMER1:
             T1CONbits.TON = 0;
-            TMR1 = 0; // reset the current value;
-            PR1 = 28800*(long)ms/1000;
-            T1CONbits.TCKPS = 0b10;
+            TMR1 = 0; // reset the current value;           
+            PR1 = pr;
+            T1CONbits.TCKPS = tckps;
             T1CONbits.TON = 1;
             break;
         case TIMER2:
             T2CONbits.TON = 0;
             TMR2 = 0; // reset the current value;
-            PR2 = 28800*(long)ms/1000;
-            T2CONbits.TCKPS = 0b10;
+            PR2 = pr;
+            T2CONbits.TCKPS = tckps;
             T2CONbits.TON = 1;
             break; 
         case TIMER3:
             T3CONbits.TON = 0;
             TMR3 = 0; // reset the current value;
-            PR3 = 28800*(long)ms/1000;
-            T3CONbits.TCKPS = 0b10;
+            PR3 = pr;
+            T3CONbits.TCKPS = tckps;
             T3CONbits.TON = 1;
             break; 
         case TIMER4:
             T4CONbits.TON = 0;
             TMR4 = 0; // reset the current value;
-            PR4= 28800*(long)ms/1000;
-            T4CONbits.TCKPS = 0b10;
+            PR4 = pr;
+            T4CONbits.TCKPS = tckps;
             T4CONbits.TON = 1;
             break; 
     }
@@ -789,6 +818,9 @@ void __attribute__ (( __interrupt__ , __auto_psv__ )) _T3Interrupt() {
         button_s5_flag = true;
         state = SAFE_MODE;
         
+        T2CONbits.TON = 0;      // stop the timer
+        TMR2 = 0;
+        
         motor_velocity rpm;
         rpm.right = 0;
         rpm.left = 0;
@@ -812,4 +844,14 @@ void __attribute__ (( __interrupt__ , __auto_psv__ )) _T4Interrupt() {
     IFS1bits.INT1IF = 0;    // reset interrupt flag
     IEC1bits.INT1IE = 1;    // enable interrupt
     
+}
+
+// Interupt timer T2
+void __attribute__ (( __interrupt__ , __auto_psv__ )) _T2Interrupt() {
+    IFS0bits.T2IF = 0;      // reset interrupt flag
+    T2CONbits.TON = 0;      // stop the timer
+    TMR2 = 0;
+     
+    state = TIMEOUT_MODE;
+    no_ref = true;
 }
