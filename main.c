@@ -99,6 +99,7 @@ volatile int state = STANDARD_MODE;
 
 volatile bool button_s6_flag = false;
 volatile bool button_s5_flag = false;
+volatile bool update_LCD = true;
 
 
 void tmr_wait_ms();
@@ -112,7 +113,7 @@ void write_buffer(volatile CircularBuffer*, char);
 int parse_byte(parser_state* ps, char byte);
 void parse_hlref(const char* msg, cartesian_velocity* d_vel);
 void set_rpm(motor_velocity);
-int next_value(const char* msg, int i, bool* is_point);
+int next_value(const char* msg, int i);
 int extract_integer();
 void send_str();
 void restart_tx();
@@ -195,12 +196,12 @@ int main(int argc, char** argv) {
     heartbeat schedInfo[MAX_TASKS];
     schedInfo[0].n = 0; 
     schedInfo[0].N = 1;     // 10 Hz
-    schedInfo[1].n = 0; //?
+    schedInfo[1].n = -1; //?
     schedInfo[1].N = 2;     // 5 Hz
     schedInfo[2].n = 0; //?
     schedInfo[2].N = 5;     // 2 Hz
     schedInfo[3].n = 0; //?
-    schedInfo[4].N = 10;    // 1 Hz
+    schedInfo[3].N = 10;    // 1 Hz
     
     double avg_temp = 0;    // temperature (mean)
     int n = 0;  // keeps track of number of samples averaged
@@ -208,6 +209,7 @@ int main(int argc, char** argv) {
     bool ref_out_of_bound = false;  // if rpm higher than allowed
     motor_velocity computed_rpm;   // rpm for the desired speed
     motor_velocity effective_rpm;  // rpm actual value
+    cartesian_velocity desired_v;
     
     tmr_wait_ms(TIMER1, 1000); // wait 1 second at startup 
     
@@ -238,7 +240,7 @@ int main(int argc, char** argv) {
                 switch(i){
                     case 0: // 10 Hz
                       
-                        task1(&pstate, &avg_temp, n, &no_ref_counter, &ref_out_of_bound, &computed_rpm, &effective_rpm);
+                        task1(&pstate, &avg_temp, n, &no_ref_counter, &ref_out_of_bound, &computed_rpm, &effective_rpm, &desired_v);
                         n++;
                         break;
                     case 1: // 5 Hz
@@ -283,7 +285,7 @@ void set_rpm(motor_velocity effective_rpm){
 }
 
 
-void task1(parser_state* pstate, double* avg_temp, int n, int* no_ref_counter, bool* ref_out_of_bound, motor_velocity* computed_rpm, motor_velocity* effective_rpm){
+void task1(parser_state* pstate, double* avg_temp, int n, int* no_ref_counter, bool* ref_out_of_bound, motor_velocity* computed_rpm, motor_velocity* effective_rpm, cartesian_velocity* desired_v){
     // TEMPERATURE
     while(ADCON1bits.DONE == 0);   //actually it won't wait on this, the conversion is already over
     //retrieve the last converted value from the ADC,
@@ -313,65 +315,63 @@ void task1(parser_state* pstate, double* avg_temp, int n, int* no_ref_counter, b
         
         if (new_ref) {
             state = STANDARD_MODE; 
+            update_LCD = true;
             *no_ref_counter = 0; // reset the counter of no ref received
             // MOTOR CONTROL
-            cartesian_velocity desired_v;
-            parse_hlref(pstate->msg_payload, &desired_v);
+            
+            parse_hlref(pstate->msg_payload, desired_v);
             
             LATBbits.LATB1 = 0; // turn off timeout led 
             
-            compute_rpm(desired_v, computed_rpm);   // compute rpm from desired cartesian velocity
+            compute_rpm(*desired_v, computed_rpm);   // compute rpm from desired cartesian velocity
             
             // saturate rpm
             *effective_rpm = *computed_rpm; // if acceptable, the computed velocity will be the velocity applied to the wheels
             *ref_out_of_bound = false;
             // left
-            if(computed_rpm->left < -50 || computed_rpm->left > 50){ 
-                effective_rpm->left = computed_rpm->left / abs(computed_rpm->left)*50;
+            if(computed_rpm->left < -50.0 || computed_rpm->left > 50.0){ 
+                effective_rpm->left = computed_rpm->left / fabs(computed_rpm->left)*50;
                 *ref_out_of_bound = true;   
             }
             // right
             if(computed_rpm->right < -50 || computed_rpm->right > 50){ 
-                effective_rpm->right = computed_rpm->right / abs(computed_rpm->right)*50;
+                effective_rpm->right = computed_rpm->right / fabs(computed_rpm->right)*50;
                 *ref_out_of_bound = true;   
             }
             
             set_rpm(*effective_rpm);
             
-            //LCD
-            // write second row
-            empty_row(2, 0);
-            char str2[] = "R: ";
-            char char1[6], char2[6];      
-            move_cursor(2,0);
-            write_str_LCD(str2);
-            if(!button_s6_flag){ 
-                sprintf(char1, "%.1f", effective_rpm->left);
-                sprintf(char2, "%.1f", effective_rpm->right);
-            }else{
-                sprintf(char1, "%.1f", desired_v.angular);
-                sprintf(char2, "%.1f", desired_v.linear); 
-            }
-            write_str_LCD(char1);
-            write_str_LCD("; ");
-            write_str_LCD(char2);
-        
+            
         }else if(state == STANDARD_MODE){
             // standard mode but no new reference
             *no_ref_counter = *no_ref_counter + 1;     
             if(*no_ref_counter>=50){    // 5 seconds but this task run at 10Hz
                 state = TIMEOUT_MODE;
+                update_LCD = true;
+                
                 // stop motors
-                motor_velocity rpm;
-                rpm.right = 0;
-                rpm.left = 0;
-                set_rpm(rpm); 
+                desired_v->angular = 0;
+                desired_v->linear = 0;
+                effective_rpm->left = 0;
+                effective_rpm->right = 0;
+              
+                set_rpm(*effective_rpm); 
             }
         }else{ //TIMEOUT MODE
             // toggle D4
             LATBbits.LATB1 = !LATBbits.LATB1;
         }
     }else{ // safe mode
+        if(button_s5_flag){
+            button_s5_flag = false;
+            update_LCD = true;
+        
+            desired_v->angular = 0;
+            desired_v->linear = 0;
+            effective_rpm->left = 0;
+            effective_rpm->right = 0;
+        }
+   
         //look for HLENA msg
         while(read_buffer(&cb_in, &byte) == 1){
             //parse the char
@@ -380,9 +380,10 @@ void task1(parser_state* pstate, double* avg_temp, int n, int* no_ref_counter, b
                 //if correct type
                 if (strcmp(pstate->msg_type, "HLENA") == 0){
                     state = STANDARD_MODE;
-                    // write and send ack
-                    char str[] = "$MCACK,ENA,1*";                  
-                    
+                    *no_ref_counter = 0;
+                    update_LCD = true;
+
+                    char str[] = "$MCACK,ENA,1*";                                 
                     send_str(&str);
                 }
             }
@@ -390,22 +391,44 @@ void task1(parser_state* pstate, double* avg_temp, int n, int* no_ref_counter, b
 
     }      
     
-    //LCD 
-    // write first row
-    move_cursor(1,0);
-    char str1[] = "STATUS: ";
-    write_str_LCD(str1);
-    switch (state){
-        case STANDARD_MODE:
-            write_str_LCD("C"); //controlled
-            break;
-        case TIMEOUT_MODE:
-            write_str_LCD("T"); //timeout
-            break;
-        case SAFE_MODE:
-            write_str_LCD("H"); //halt
-            break;
-    }
+    
+    if(update_LCD){
+        update_LCD = false;
+        //LCD 
+        // write first row
+        move_cursor(1,0);
+        char str1[] = "STATUS: ";
+        write_str_LCD(str1);
+        switch (state){
+            case STANDARD_MODE:
+                write_str_LCD("C"); //controlled
+                break;
+            case TIMEOUT_MODE:
+                write_str_LCD("T"); //timeout
+                break;
+            case SAFE_MODE:
+                write_str_LCD("H"); //halt
+                break;
+        }
+
+        //LCD
+        // write second row
+        empty_row(2, 0);
+        char str2[] = "R: ";
+        char char1[6], char2[6];      
+        move_cursor(2,0);
+        write_str_LCD(str2);
+        if(!button_s6_flag){ 
+            sprintf(char1, "%.1f", effective_rpm->left);
+            sprintf(char2, "%.1f", effective_rpm->right);
+        }else{
+            sprintf(char1, "%.1f", desired_v->angular);
+            sprintf(char2, "%.1f", desired_v->linear); 
+        }
+        write_str_LCD(char1);
+        write_str_LCD("; ");
+        write_str_LCD(char2);
+    }    
     
     restart_tx();
     ADCON1bits.SAMP = 1; // start sampling
@@ -532,6 +555,10 @@ int parse_byte(parser_state* ps, char byte){
                 ps->state = STATE_PAYLOAD;
                 ps->msg_type[ps->index_type] = '\0';
                 ps->index_payload = 0;           
+            }else if(byte == '*'){
+                ps->state = STATE_DOLLAR;
+                ps->msg_payload[ps->index_payload] = '\0';
+                return NEW_MESSAGE;     
             }else if(ps->index_type == 6){
                 ps->state = STATE_DOLLAR;
                 ps->index_type = 0;           
@@ -753,6 +780,7 @@ void __attribute__ (( __interrupt__ , __auto_psv__ )) _T3Interrupt() {
     // If the button is not pressed
     if (PORTEbits.RE8 == 1) {
         button_s5_flag = true;
+        state = SAFE_MODE;
         
         motor_velocity rpm;
         rpm.right = 0;
@@ -772,6 +800,7 @@ void __attribute__ (( __interrupt__ , __auto_psv__ )) _T4Interrupt() {
     // If the button is not pressed    
     if (PORTDbits.RD0 == 1) {
         button_s6_flag = !button_s6_flag;
+        update_LCD = true;
     }
     IFS1bits.INT1IF = 0;    // reset interrupt flag
     IEC1bits.INT1IE = 1;    // enable interrupt
