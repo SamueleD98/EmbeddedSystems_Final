@@ -40,6 +40,8 @@
 #include <string.h>
 #include <stdbool.h>
 #include <math.h>
+#include <ctype.h>
+
 
 // Timer
 #define TIMER1 1    
@@ -57,7 +59,7 @@
 #define AXLE 0.5
 #define PI 3.14159
 
-#define BUFFER_SIZE_IN 26
+#define BUFFER_SIZE_IN 48
 #define BUFFER_SIZE_OUT 48
 typedef struct {
     char* buffer;
@@ -70,8 +72,8 @@ volatile CircularBuffer cb_out;
 
 typedef struct{
     int state;
-    char msg_type[6];   // type is 5 chars 
-    char msg_payload[10]; // payload can't have more than ???? digits
+    char msg_type[6];  
+    char msg_payload[12]; 
     int index_type;
     int index_payload;
 } parser_state;
@@ -104,22 +106,22 @@ volatile bool button_s5_flag = false;
 volatile bool update_LCD = true;
 volatile bool no_ref = false;
 
-
 void tmr_wait_ms();
 void tmr_setup_period();
 void tmr_wait_period();
-void write_str_LCD(); // for debug
-void move_cursor();   // for debug
+void write_str_LCD(); 
+void move_cursor();   
 void empty_row();
 int read_buffer(volatile CircularBuffer*, char*);
 void write_buffer(volatile CircularBuffer*, char);
 int parse_byte(parser_state* ps, char byte);
-void parse_hlref(const char* msg, cartesian_velocity* d_vel);
+int parse_hlref(const char* msg, cartesian_velocity* d_vel);
 void set_rpm(motor_velocity);
 int next_value(const char* msg, int i);
 int extract_integer();
 void send_str();
 void restart_tx();
+void compute_rpm();
 
 void task1();
 void task2();
@@ -170,8 +172,7 @@ int main(int argc, char** argv) {
     cb_out.size  = BUFFER_SIZE_OUT;
    
     // Configuration UART
-    U2BRG = 24; // BAUD RATE REG: (7372800 / 4) / (16 * 4800) - 1 because we need to receive 24 Bytes/100ms and send 42 byte/100ms in the worst case scenario 
-// Bound rate supporta almeno 10Hz di entrambe le reference ricez/trasmit (considera caso peggiore--> 9600 tantissimi, 300 troppo poco rischi di vedere valori vecchi)
+    U2BRG = 24; //Baudrate 4800
     U2MODEbits.UARTEN = 1;  // enable UART
     U2STAbits.UTXEN = 1;    // enable U2TX 
     U2STAbits.UTXISEL = 0b1; // interrupt when transmit buffer becomes empty
@@ -190,6 +191,7 @@ int main(int argc, char** argv) {
     PTPER = 1842; // round of 1842.2 to the smallest integer
     PDC2 = PTPER;  // duty cycle 50% 
     PDC3 = PTPER;  // duty cycle 50% 
+    // DeadTime TCY*6 = 3.25 micros
     DTCON1bits.DTAPS = 0;
     DTCON1bits.DTA = 6;
     PTCONbits.PTEN = 1;
@@ -204,23 +206,24 @@ int main(int argc, char** argv) {
     heartbeat schedInfo[MAX_TASKS];
     schedInfo[0].n = 0; 
     schedInfo[0].N = 1;     // 10 Hz
-    schedInfo[1].n = -1; //?
+    schedInfo[1].n = -1; 
     schedInfo[1].N = 2;     // 5 Hz
-    schedInfo[2].n = 0; //?
+    schedInfo[2].n = 0; 
     schedInfo[2].N = 5;     // 2 Hz
-    schedInfo[3].n = 0; //?
+    schedInfo[3].n = 0; 
     schedInfo[3].N = 10;    // 1 Hz
     
     double avg_temp = 0;    // temperature (mean)
     int n = 0;  // keeps track of number of samples averaged
-    int no_ref_counter = 0; // how many time no reference came
     bool ref_out_of_bound = false;  // if rpm higher than allowed
+    cartesian_velocity desired_v;   // PC given velocities
     motor_velocity computed_rpm;   // rpm for the desired speed
     motor_velocity effective_rpm;  // rpm actual value
-    cartesian_velocity desired_v;
+    effective_rpm.right = 0;
+    effective_rpm.left = 0;
+    set_rpm(effective_rpm);
     
     tmr_wait_ms(TIMER1, 1000); // wait 1 second at startup 
-    
     
     // Enable interrupts
     IEC0bits.INT0IE = 1; //S5
@@ -232,12 +235,14 @@ int main(int argc, char** argv) {
     IEC1bits.U2RXIE = 1; // enable receiver interrupt 
     
     ADCON1bits.SAMP = 1; // start first sampling
+     
+    char str1[] = "STATUS: ";
+    char str2[] = "R: ";
+    move_cursor(1,0);
+    write_str_LCD(str1);
+    move_cursor(2,0);        
+    write_str_LCD(str2);
     
-    
-    effective_rpm.right = 0;
-    effective_rpm.left = 0;
-    set_rpm(effective_rpm);
-        
     tmr_setup_period(TIMER1, HEARTBEAT_TIME);
     tmr_setup_period(TIMER2, 5000);
     while(1) {
@@ -249,9 +254,8 @@ int main(int argc, char** argv) {
             if(schedInfo[i].n >= schedInfo[i].N){
                 switch(i){
                     case 0: // 10 Hz
-                      
-                        task1(&pstate, &avg_temp, n, &no_ref_counter, &ref_out_of_bound, &computed_rpm, &effective_rpm, &desired_v);
-                        n++;
+                        task1(&pstate, &avg_temp, n, &ref_out_of_bound, &computed_rpm, &effective_rpm, &desired_v);
+                        n++;    //increment temp values counter
                         break;
                     case 1: // 5 Hz
                         task2(&effective_rpm);
@@ -260,7 +264,6 @@ int main(int argc, char** argv) {
                         //task3
                         LATBbits.LATB0 = !LATBbits.LATB0;
                         break;
-                        
                     case 3: // 1 Hz
                         n = 0;  // Start a new set of temperatures to average
                         task4(&ref_out_of_bound, &computed_rpm, &avg_temp);
@@ -269,33 +272,12 @@ int main(int argc, char** argv) {
                 schedInfo[i].n = 0;
             }
         }
-        
-        // If the timer has expired
-        /*if(IFS0bits.T1IF == 1){
-            // out of time
-        }*/
         tmr_wait_period(TIMER1);
     }
     return (EXIT_SUCCESS);
 }
 
-void compute_rpm(cartesian_velocity desired_v, motor_velocity* computed_rpm){
-    // wheels velocity in rad/s
-    double omega_r = (desired_v.linear + (AXLE * desired_v.angular /2 ))/RADIUS;
-    double omega_l = (desired_v.linear - (AXLE * desired_v.angular /2 ))/RADIUS;
-    // wheels velocity in rpm
-    computed_rpm->right = omega_r * 30/(PI);
-    computed_rpm->left  = omega_l * 30/(PI);
-}
-
-void set_rpm(motor_velocity effective_rpm){
-   // change PWMs duty cicle
-   PDC2 = PTPER * (1 + effective_rpm.left/60); 
-   PDC3 = PTPER * (1 + effective_rpm.right/60); 
-}
-
-
-void task1(parser_state* pstate, double* avg_temp, int n, int* no_ref_counter, bool* ref_out_of_bound, motor_velocity* computed_rpm, motor_velocity* effective_rpm, cartesian_velocity* desired_v){
+void task1(parser_state* pstate, double* avg_temp, int n, bool* ref_out_of_bound, motor_velocity* computed_rpm, motor_velocity* effective_rpm, cartesian_velocity* desired_v){
     // TEMPERATURE
     while(ADCON1bits.DONE == 0);   //actually it won't wait on this, the conversion is already over
     //retrieve the last converted value from the ADC,
@@ -307,7 +289,7 @@ void task1(parser_state* pstate, double* avg_temp, int n, int* no_ref_counter, b
     //update the mean
     *avg_temp = (*avg_temp * n + temperature) / (n+1);
     
-    
+    // CONTROL
     char byte;
     if(state != SAFE_MODE){
         // check for new reference
@@ -318,7 +300,9 @@ void task1(parser_state* pstate, double* avg_temp, int n, int* no_ref_counter, b
             if ( ret == NEW_MESSAGE) {
                 //if correct type
                 if (strcmp(pstate->msg_type, "HLREF") == 0){
-                    new_ref = true;
+                    if(parse_hlref(pstate->msg_payload, desired_v) == 1){
+                        new_ref = true;
+                    }
                 }
             }
         }
@@ -326,15 +310,9 @@ void task1(parser_state* pstate, double* avg_temp, int n, int* no_ref_counter, b
         if (new_ref) {
             state = STANDARD_MODE; 
             update_LCD = true;
-            //*no_ref_counter = 0; // reset the counter of no ref received
-            // on timer
-            T2CONbits.TON = 1;      // stop the timer
+            
             TMR2 = 0; 
-            
-            // MOTOR CONTROL
-            
-            parse_hlref(pstate->msg_payload, desired_v);
-            
+            T2CONbits.TON = 1;  
             LATBbits.LATB1 = 0; // turn off timeout led 
             
             compute_rpm(*desired_v, computed_rpm);   // compute rpm from desired cartesian velocity
@@ -355,10 +333,10 @@ void task1(parser_state* pstate, double* avg_temp, int n, int* no_ref_counter, b
             
             set_rpm(*effective_rpm);
             
-            
         }else if(state == TIMEOUT_MODE){
             if (no_ref){
                 no_ref = false;
+                *ref_out_of_bound = false;
                 desired_v->angular = 0;
                 desired_v->linear = 0;
                 effective_rpm->left = 0;
@@ -367,7 +345,6 @@ void task1(parser_state* pstate, double* avg_temp, int n, int* no_ref_counter, b
                 update_LCD = true;
             }
              
-            // stop timer
             LATBbits.LATB1 = !LATBbits.LATB1;
         }
     }else{ // safe mode
@@ -375,6 +352,7 @@ void task1(parser_state* pstate, double* avg_temp, int n, int* no_ref_counter, b
             button_s5_flag = false;
             update_LCD = true;
         
+            // just for showing on LCD
             desired_v->angular = 0;
             desired_v->linear = 0;
             effective_rpm->left = 0;
@@ -389,7 +367,8 @@ void task1(parser_state* pstate, double* avg_temp, int n, int* no_ref_counter, b
                 //if correct type
                 if (strcmp(pstate->msg_type, "HLENA") == 0){
                     state = STANDARD_MODE;
-                    T2CONbits.TON = 1;      // stop the timer 
+                    T2CONbits.TON = 1;   
+                    
                     update_LCD = true;
 
                     char str[] = "$MCACK,ENA,1*";                                 
@@ -397,17 +376,13 @@ void task1(parser_state* pstate, double* avg_temp, int n, int* no_ref_counter, b
                 }
             }
         }
-
     }      
-    
     
     if(update_LCD){
         update_LCD = false;
         //LCD 
         // write first row
-        move_cursor(1,0);
-        char str1[] = "STATUS: ";
-        write_str_LCD(str1);
+        move_cursor(1,8);
         switch (state){
             case STANDARD_MODE:
                 write_str_LCD("C"); //controlled
@@ -419,14 +394,10 @@ void task1(parser_state* pstate, double* avg_temp, int n, int* no_ref_counter, b
                 write_str_LCD("H"); //halt
                 break;
         }
-
-        //LCD
         // write second row
-        empty_row(2, 0);
-        char str2[] = "R: ";
         char char1[6], char2[6];      
-        move_cursor(2,0);
-        write_str_LCD(str2);
+        empty_row(2, 3);
+        move_cursor(2,3);
         if(!button_s6_flag){ 
             sprintf(char1, "%.1f", effective_rpm->left);
             sprintf(char2, "%.1f", effective_rpm->right);
@@ -443,7 +414,7 @@ void task1(parser_state* pstate, double* avg_temp, int n, int* no_ref_counter, b
     ADCON1bits.SAMP = 1; // start sampling
 }
 
-void task2(motor_velocity* effective_rpm){    //could it be better to pass the chars already?
+void task2(motor_velocity* effective_rpm){    
     char str[22];
     char n1[6], n2[6];      
     sprintf(n1, "%.1f", effective_rpm->left);  
@@ -503,6 +474,21 @@ void task4(bool* ref_out_of_bound, motor_velocity* computed_rpm, double* avg_tem
     restart_tx();
 }
 
+void compute_rpm(cartesian_velocity desired_v, motor_velocity* computed_rpm){
+    // wheels velocity in rad/s
+    double omega_r = (desired_v.linear + (AXLE * desired_v.angular /2 ))/RADIUS;
+    double omega_l = (desired_v.linear - (AXLE * desired_v.angular /2 ))/RADIUS;
+    // wheels velocity in rpm
+    computed_rpm->right = omega_r * 30/(PI);
+    computed_rpm->left  = omega_l * 30/(PI);
+}
+
+void set_rpm(motor_velocity effective_rpm){
+   // change PWMs duty cicle
+   PDC2 = PTPER * (1 + effective_rpm.left/60); 
+   PDC3 = PTPER * (1 + effective_rpm.right/60); 
+}
+
 void send_str(char *str){
     for(int i = 0; i < strlen(str); i++){
         write_buffer(&cb_out, str[i]);
@@ -510,12 +496,11 @@ void send_str(char *str){
 }
 
 void restart_tx(){
-    //next we are going to send chars directly on UART
+    //we are going to send chars directly on UART
     //so disable the interrupt on trasmision     
     IEC1bits.U2TXIE = 0;  
    
-    //fill the transmit buffer with values from cb_out 
-    // (if any, but there are for sure)
+    //fill the transmit buffer with values from cb_out (if any)
     //this to restart the chain of interrupts on trasmission until cb_out is empty
     while(U2STAbits.UTXBF == 0){
             char value;
@@ -528,18 +513,27 @@ void restart_tx(){
     IEC1bits.U2TXIE = 1;    // enable transmitter interrupt 
 }
 
-void parse_hlref(const char* msg, cartesian_velocity* d_vel){
+int parse_hlref(const char* msg, cartesian_velocity* d_vel){
     int i=0;
-    char *eptr;
-
-    double n1 = strtod(msg, &eptr);
+    
+    /* ignore, should check the validity of the payload
+    for(int j=0; j<=strlen(msg); j++){
+        if(msg[j] != '.' && msg[j] != ',' && isdigit(msg[j])==0 && msg[j] != '+' && msg[j] != '-'){
+            return 0;
+        }
+    }
+    */
+    
+    double n1 = strtod(msg, NULL);
     
     i = next_value(msg, i);
    
-    double n2 = strtod(msg+i, &eptr);
+    double n2 = strtod(msg+i, NULL);
    
     d_vel->angular = n1;
     d_vel->linear = n2;
+    
+    return 1;
 }    
 
 int next_value(const char* msg, int i){
@@ -549,7 +543,6 @@ int next_value(const char* msg, int i){
     }
     return i;
 }
-
 
 int parse_byte(parser_state* ps, char byte){
     switch (ps->state){
@@ -592,9 +585,6 @@ int parse_byte(parser_state* ps, char byte){
     }
     return NO_MESSAGE;
 }
-
-
-
 
 // Function to write on the buffer
 void write_buffer(volatile CircularBuffer* cb, char char_rcv){
