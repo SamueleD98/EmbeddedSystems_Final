@@ -59,8 +59,8 @@
 #define AXLE 0.5
 #define PI 3.14159
 
-#define BUFFER_SIZE_IN 48
-#define BUFFER_SIZE_OUT 48
+#define BUFFER_SIZE_IN 48  // because baudrate = 4800
+#define BUFFER_SIZE_OUT 36 //worst case, MCFBK + MCACK
 typedef struct {
     char* buffer;
     int size;
@@ -89,7 +89,7 @@ typedef struct{
 } motor_velocity;
 
 //Scheduler
-#define MAX_TASKS 4
+#define MAX_TASKS 5
 #define HEARTBEAT_TIME 100  
 typedef struct{
     int n;
@@ -126,6 +126,7 @@ void compute_rpm();
 void task1();
 void task2();
 void task4();
+void task5();
 
 int main(int argc, char** argv) {
     
@@ -140,17 +141,11 @@ int main(int argc, char** argv) {
     ADCON3bits.ADCS = 32; //longest Tad
     ADCON1bits.ASAM = 0; // manual start
     ADCON1bits.SSRC = 7; // conversion starts after time specified by SAMC
-    // Serve solo 1 canale
-    // ADCON2bits.CHPS = 1; // CH0 and CH1
+    ADCON3bits.SAMC = 31;
 	ADCON2bits.CHPS = 0b00; // CH0
-    // ADCHSbits.CH0SA = 2; // positive input AN2 (potentiometer)   
-    // ADCHSbits.CH123SA = 1; // positive input AN3 (termometer)
 	ADCHSbits.CH0SA = 0b11; // positive input AN3 (termometer)
     ADPCFG = 0xFFFF;    // everything to digital
-    // ADPCFGbits.PCFG2 = 0; // AN2 as analog input
     ADPCFGbits.PCFG3 = 0; // AN3 as analog input
-    ADCON1bits.SIMSAM = 0; // sample in sequence
-    ADCON2bits.SMPI = 0;  // number of inputs - 1
     ADCON1bits.ADON = 1; //turn on
    
     // Configuration SPI
@@ -212,6 +207,8 @@ int main(int argc, char** argv) {
     schedInfo[2].N = 5;     // 2 Hz
     schedInfo[3].n = 0; 
     schedInfo[3].N = 10;    // 1 Hz
+    schedInfo[4].n = -2; 
+    schedInfo[4].N = 10;    // 1 Hz
     
     double avg_temp = 0;    // temperature (mean)
     int n = 0;  // keeps track of number of samples averaged
@@ -266,7 +263,12 @@ int main(int argc, char** argv) {
                         break;
                     case 3: // 1 Hz
                         n = 0;  // Start a new set of temperatures to average
-                        task4(&ref_out_of_bound, &computed_rpm, &avg_temp);
+                        task4(&avg_temp);
+                        break;
+                    case 4: // 1 Hz
+                        if(ref_out_of_bound){
+                            task5(&computed_rpm);
+                        }
                         break;
                 }
                 schedInfo[i].n = 0;
@@ -331,7 +333,11 @@ void task1(parser_state* pstate, double* avg_temp, int n, bool* ref_out_of_bound
                 *ref_out_of_bound = true;   
             }
             
-            set_rpm(*effective_rpm);
+            IEC0bits.INT0IE = 0;    // disable interrupt
+            if(state != SAFE_MODE){
+                set_rpm(*effective_rpm);
+            }
+            IEC0bits.INT0IE = 1;
             
         }else if(state == TIMEOUT_MODE){
             if (no_ref){
@@ -443,7 +449,7 @@ void task2(motor_velocity* effective_rpm){
     restart_tx();  
 }
 
-void task4(bool* ref_out_of_bound, motor_velocity* computed_rpm, double* avg_temp){
+void task4(double* avg_temp){
     //$MCTEM,temp* where temp is the temperature
     char str1[14];
     char temp[6];      
@@ -453,24 +459,24 @@ void task4(bool* ref_out_of_bound, motor_velocity* computed_rpm, double* avg_tem
     strcat(str1, temp);
     strcat(str1, "*");
     
-    send_str(str1);
+    send_str(str1);    
+    restart_tx();
+}
 
+void task5(motor_velocity* computed_rpm){
     //the MCALE thing
-    if(*ref_out_of_bound){
-        char str2[20];
-        char n1[6], n2[6];      
-        sprintf(n1, "%.1f", computed_rpm->left);  
-        sprintf(n2, "%.1f", computed_rpm->right);
+    char str[20];
+    char n1[6], n2[6];      
+    sprintf(n1, "%.1f", computed_rpm->left);  
+    sprintf(n2, "%.1f", computed_rpm->right);
 
-        strcpy(str2, "$MCALE,");
-        strcat(str2, n1);
-        strcat(str2, ",");
-        strcat(str2, n2);
-        strcat(str2, "*");
-        
-        send_str(str2);       
-    }
-    
+    strcpy(str, "$MCALE,");
+    strcat(str, n1);
+    strcat(str, ",");
+    strcat(str, n2);
+    strcat(str, "*");
+
+    send_str(str);           
     restart_tx();
 }
 
