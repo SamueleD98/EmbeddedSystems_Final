@@ -41,6 +41,7 @@
 #include <stdbool.h>
 #include <math.h>
 #include <ctype.h>
+#include <p30F4011.h>
 
 
 // Timer
@@ -58,6 +59,7 @@
 #define RADIUS 0.2
 #define AXLE 0.5
 #define PI 3.14159
+#define RPM_MAX 50
 
 #define BUFFER_SIZE_IN 48  // because baudrate = 4800
 #define BUFFER_SIZE_OUT 36 //worst case, MCFBK + MCACK
@@ -310,55 +312,60 @@ void task1(parser_state* pstate, double* avg_temp, int n, bool* ref_out_of_bound
         }
         
         if (new_ref) {
+            // reset timeout timer before updating the state
+            TMR2 = 0; 
+            // turning it on if exiting timeout mode
+            T2CONbits.TON = 1;  
+            // turn off timeout led 
+            LATBbits.LATB1 = 0; 
+            
             state = STANDARD_MODE; 
             update_LCD = true;
             
-            TMR2 = 0; 
-            T2CONbits.TON = 1;  
-            LATBbits.LATB1 = 0; // turn off timeout led 
+            IEC0bits.INT0IE = 0;    // disable safemode interrupt until after setting the new rpm
             
-            compute_rpm(*desired_v, computed_rpm);   // compute rpm from desired cartesian velocity
-            
+             // compute rpm from desired cartesian velocity
+            compute_rpm(*desired_v, computed_rpm);  
             // saturate rpm
             *effective_rpm = *computed_rpm; // if acceptable, the computed velocity will be the velocity applied to the wheels
             *ref_out_of_bound = false;
             // left
-            if(computed_rpm->left < -50.0 || computed_rpm->left > 50.0){ 
-                effective_rpm->left = computed_rpm->left / fabs(computed_rpm->left)*50;
+            if(fabs(computed_rpm->left) > RPM_MAX){ 
+                effective_rpm->left = computed_rpm->left / fabs(computed_rpm->left)*RPM_MAX;
                 *ref_out_of_bound = true;   
             }
             // right
-            if(computed_rpm->right < -50 || computed_rpm->right > 50){ 
-                effective_rpm->right = computed_rpm->right / fabs(computed_rpm->right)*50;
+            if(fabs(computed_rpm->right) > RPM_MAX){ 
+                effective_rpm->right = computed_rpm->right / fabs(computed_rpm->right)*RPM_MAX;
                 *ref_out_of_bound = true;   
             }
             
-            IEC0bits.INT0IE = 0;    // disable interrupt
-            if(state != SAFE_MODE){
+            if(state != SAFE_MODE){ // if the interrupt came before disabling it
                 set_rpm(*effective_rpm);
             }
             IEC0bits.INT0IE = 1;
             
         }else if(state == TIMEOUT_MODE){
-            if (no_ref){
+            if (no_ref){    //done just when entering timeout mode
                 no_ref = false;
                 *ref_out_of_bound = false;
+                update_LCD = true;
+                
                 desired_v->angular = 0;
                 desired_v->linear = 0;
                 effective_rpm->left = 0;
                 effective_rpm->right = 0;
-                set_rpm(*effective_rpm);
-                update_LCD = true;
+                set_rpm(*effective_rpm);    // should we make it safe?
             }
              
             LATBbits.LATB1 = !LATBbits.LATB1;
         }
     }else{ // safe mode
-        if(button_s5_flag){
+        if(button_s5_flag){     //done just when entering safe mode
             button_s5_flag = false;
             update_LCD = true;
         
-            // just for showing on LCD
+            // just for showing on LCD, velocities already set to zero
             desired_v->angular = 0;
             desired_v->linear = 0;
             effective_rpm->left = 0;
@@ -372,13 +379,16 @@ void task1(parser_state* pstate, double* avg_temp, int n, bool* ref_out_of_bound
             if ( ret == NEW_MESSAGE) {
                 //if correct type
                 if (strcmp(pstate->msg_type, "HLENA") == 0){
+                    // change state
                     state = STANDARD_MODE;
+                    // turning timeout timer on (already resetted)
                     T2CONbits.TON = 1;   
-                    
-                    update_LCD = true;
-
+                    update_LCD = true;  // to show new status
+                    // send ack
                     char str[] = "$MCACK,ENA,1*";                                 
                     send_str(&str);
+                    // ready to receive safe mode signal
+                    IEC1bits.INT1IE = 1;    // enable interrupt
                 }
             }
         }
@@ -386,9 +396,11 @@ void task1(parser_state* pstate, double* avg_temp, int n, bool* ref_out_of_bound
     
     if(update_LCD){
         update_LCD = false;
-        //LCD 
         // write first row
         move_cursor(1,8);
+        // We should disable the interrupts in order to show always the correct current state.
+        // Being just a matter of showing the status, if this changes while executing 
+        // the following switch, the program will update to the correct status the next period
         switch (state){
             case STANDARD_MODE:
                 write_str_LCD("C"); //controlled
@@ -422,7 +434,9 @@ void task1(parser_state* pstate, double* avg_temp, int n, bool* ref_out_of_bound
 
 void task2(motor_velocity* effective_rpm){    
     char str[22];
-    char n1[6], n2[6];      
+    char n1[6], n2[6];     
+    
+    // same comment as above (LCD) about the interrupts
     sprintf(n1, "%.1f", effective_rpm->left);  
     sprintf(n2, "%.1f", effective_rpm->right);
            
@@ -450,7 +464,7 @@ void task2(motor_velocity* effective_rpm){
 }
 
 void task4(double* avg_temp){
-    //$MCTEM,temp* where temp is the temperature
+    //TEMP
     char str1[14];
     char temp[6];      
     sprintf(temp, "%.1f", *avg_temp);  
@@ -464,9 +478,11 @@ void task4(double* avg_temp){
 }
 
 void task5(motor_velocity* computed_rpm){
-    //the MCALE thing
+    //MCALE
     char str[20];
     char n1[6], n2[6];      
+    
+    // same comment as above (LCD) about the interrupts
     sprintf(n1, "%.1f", computed_rpm->left);  
     sprintf(n2, "%.1f", computed_rpm->right);
 
@@ -834,11 +850,12 @@ void __attribute__ (( __interrupt__ , __auto_psv__ )) _T4Interrupt() {
 
     // If the button is not pressed    
     if (PORTDbits.RD0 == 1) {
+        IEC1bits.INT1IE = 0;    // disable interrupt
         button_s6_flag = !button_s6_flag;
         update_LCD = true;
     }
     IFS1bits.INT1IF = 0;    // reset interrupt flag
-    IEC1bits.INT1IE = 1;    // enable interrupt
+    //IEC1bits.INT1IE = 1;    // enable interrupt
     
 }
 
